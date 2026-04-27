@@ -56,6 +56,13 @@ const PING_TIMEOUT: Duration = Duration::from_secs(3);
 
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Proactively reconnect the dealer websocket before the access token expires.
+/// Spotify access tokens typically expire after 3600s (1 hour). We reconnect
+/// after 50 minutes to avoid the server closing the connection due to token
+/// expiry, which would cause the spirc to shut down unexpectedly and lose
+/// playback state.
+const PROACTIVE_RECONNECT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
 const DEALER_REQUEST_HANDLERS_POISON_MSG: &str =
     "dealer request handlers mutex should not be poisoned";
 const DEALER_MESSAGE_HANDLERS_POISON_MSG: &str =
@@ -678,11 +685,35 @@ where
         (None, None)
     };
 
+    // Track when the current connection was established so we can
+    // proactively reconnect before the access token expires.
+    let mut connected_at = if tasks.0.is_some() {
+        Some(tokio::time::Instant::now())
+    } else {
+        None
+    };
+
     while !shared.is_closed() {
         match &mut tasks {
             (Some(t0), Some(t1)) => {
+                let reconnect_deadline = tokio::time::sleep_until(
+                    connected_at.unwrap_or_else(tokio::time::Instant::now)
+                        + PROACTIVE_RECONNECT_INTERVAL,
+                );
+
                 select! {
                     () = shared.closed() => break,
+                    // Proactive reconnect: tear down the current websocket
+                    // before the token expires so we can reconnect with a
+                    // fresh token without the spirc seeing a broken stream.
+                    () = reconnect_deadline => {
+                        info!("Proactively reconnecting dealer websocket before token expiry");
+                        // Drop both tasks to trigger a graceful close,
+                        // then the loop falls into the reconnect arm.
+                        tasks.0.take();
+                        tasks.1.take();
+                        connected_at = None;
+                    },
                     r = t0 => {
                         if let Err(e) = r {
                             error!("timeout on task 0: {e}");
@@ -706,7 +737,10 @@ where
                 }?;
 
                 match connect(&url, proxy.as_ref(), &shared).await {
-                    Ok((s, r)) => tasks = (init_task(s), init_task(r)),
+                    Ok((s, r)) => {
+                        tasks = (init_task(s), init_task(r));
+                        connected_at = Some(tokio::time::Instant::now());
+                    }
                     Err(e) => {
                         error!("Error while connecting: {e}");
                         tokio::time::sleep(RECONNECT_INTERVAL).await;
