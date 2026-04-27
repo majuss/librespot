@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     sync::{Condvar, Mutex},
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
 use futures_util::{StreamExt, TryFutureExt, future::IntoStream};
@@ -323,7 +323,11 @@ struct AudioFileDownloadStatus {
 }
 
 struct AudioFileShared {
-    cdn_url: String,
+    file_id: FileId,
+    cdn_url: Mutex<String>,
+    /// Earliest expiry time of CDN URLs, if known. Used to proactively
+    /// re-resolve CDN URLs before they expire during long playback sessions.
+    cdn_url_expiry: Mutex<Option<Instant>>,
     file_size: usize,
     bytes_per_second: usize,
     cond: Condvar,
@@ -373,6 +377,20 @@ impl AudioFileShared {
     fn set_read_position(&self, position: u64) {
         self.read_position
             .store(position as usize, Ordering::Release)
+    }
+
+    fn get_cdn_url(&self) -> String {
+        self.cdn_url
+            .lock()
+            .expect("cdn_url mutex should not be poisoned")
+            .clone()
+    }
+
+    fn set_cdn_url(&self, url: String) {
+        *self
+            .cdn_url
+            .lock()
+            .expect("cdn_url mutex should not be poisoned") = url;
     }
 }
 
@@ -507,8 +525,20 @@ impl AudioFileStreaming {
             length: upper_bound + 1,
         };
 
+        // Calculate when the CDN URL expires so we can proactively refresh it.
+        let cdn_url_expiry = cdn_url.earliest_expiry().and_then(|sys_expiry| {
+            let now_sys = SystemTime::now();
+            let now_inst = Instant::now();
+            sys_expiry
+                .duration_since(now_sys)
+                .ok()
+                .map(|remaining| now_inst + remaining)
+        });
+
         let shared = Arc::new(AudioFileShared {
-            cdn_url: url.to_string(),
+            file_id,
+            cdn_url: Mutex::new(url.to_string()),
+            cdn_url_expiry: Mutex::new(cdn_url_expiry),
             file_size,
             bytes_per_second,
             cond: Condvar::new(),

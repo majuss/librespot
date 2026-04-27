@@ -2,7 +2,7 @@ use std::{
     cmp::{max, min},
     io::{Seek, SeekFrom, Write},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use bytes::Bytes;
@@ -12,7 +12,7 @@ use hyper::StatusCode;
 use tempfile::NamedTempFile;
 use tokio::sync::{mpsc, oneshot};
 
-use librespot_core::{Error, http_client::HttpClient, session::Session};
+use librespot_core::{Error, http_client::HttpClient, session::Session, cdn_url::CdnUrl};
 
 use crate::range_set::{Range, RangeSet};
 
@@ -208,9 +208,10 @@ impl AudioFileFetch {
 
         // TODO : refresh cdn_url when the token expired
 
+        let cdn_url = self.shared.get_cdn_url();
         for range in ranges_to_request.iter() {
             let streamer = self.session.spclient().stream_from_cdn(
-                &self.shared.cdn_url,
+                &cdn_url,
                 range.start,
                 range.length,
             )?;
@@ -401,6 +402,69 @@ impl AudioFileFetch {
         Ok(ControlFlow::Continue)
     }
 
+    async fn refresh_cdn_url_if_needed(&self) {
+        let needs_refresh = {
+            let expiry = self
+                .shared
+                .cdn_url_expiry
+                .lock()
+                .expect("cdn_url_expiry mutex should not be poisoned");
+            match *expiry {
+                // Refresh 5 minutes before expiry to avoid edge cases
+                Some(exp) => Instant::now() + Duration::from_secs(300) >= exp,
+                None => false,
+            }
+        };
+
+        if !needs_refresh {
+            return;
+        }
+
+        info!(
+            "CDN URL approaching expiry for file {:?}, re-resolving...",
+            self.shared.file_id
+        );
+
+        match CdnUrl::new(self.shared.file_id)
+            .resolve_audio(&self.session)
+            .await
+        {
+            Ok(new_cdn_url) => {
+                match new_cdn_url.try_get_urls() {
+                    Ok(urls) => {
+                        if let Some(url) = urls.first() {
+                            self.shared.set_cdn_url(url.to_string());
+
+                            // Update expiry
+                            let new_expiry =
+                                new_cdn_url.earliest_expiry().and_then(|sys_expiry| {
+                                    let now_sys = SystemTime::now();
+                                    let now_inst = Instant::now();
+                                    sys_expiry
+                                        .duration_since(now_sys)
+                                        .ok()
+                                        .map(|remaining| now_inst + remaining)
+                                });
+                            *self
+                                .shared
+                                .cdn_url_expiry
+                                .lock()
+                                .expect("cdn_url_expiry mutex should not be poisoned") = new_expiry;
+
+                            info!("Successfully refreshed CDN URL for file {:?}", self.shared.file_id);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to get URLs from refreshed CDN URL: {e:?}");
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to refresh CDN URL for file {:?}: {e:?}", self.shared.file_id);
+            }
+        }
+    }
+
     fn finish(&mut self) -> AudioFileResult {
         let output = self.output.take();
 
@@ -463,6 +527,10 @@ pub(super) async fn audio_file_fetch(
     };
 
     loop {
+        // Proactively refresh CDN URL before it expires. This prevents playback
+        // interruptions during long sessions (tokens typically expire after ~60 min).
+        fetch.refresh_cdn_url_if_needed().await;
+
         tokio::select! {
             cmd = stream_loader_command_rx.recv() => {
                 match cmd {

@@ -124,6 +124,20 @@ impl CdnUrl {
             Ok(urls)
         }
     }
+
+    /// Returns the earliest expiry time across all URLs, if any URL has an expiry.
+    pub fn earliest_expiry(&self) -> Option<std::time::SystemTime> {
+        self.urls
+            .iter()
+            .filter_map(|MaybeExpiringUrl(_, expiry)| {
+                expiry.map(|e| {
+                    let timestamp_ms = e.as_timestamp_ms();
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::from_millis(timestamp_ms as u64)
+                })
+            })
+            .min()
+    }
 }
 
 impl TryFrom<CdnUrlMessage> for MaybeExpiringUrls {
