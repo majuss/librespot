@@ -1105,14 +1105,14 @@ impl PlayerTrackLoader {
 
             let stream_loader_controller = encrypted_file.get_stream_loader_controller().ok()?;
 
-            // Not all audio files are encrypted. If we can't get a key, try loading the track
-            // without decryption. If the file was encrypted after all, the decoder will fail
-            // parsing and bail out, so we should be safe from outputting ear-piercing noise.
+            // All Spotify audio files are encrypted. If we can't get a key, fail the
+            // track load instead of attempting decryption without a key (which would
+            // always fail and trigger an unnecessary skip cascade).
             let key = match self.session.audio_key().request(track_id, file_id).await {
                 Ok(key) => Some(key),
                 Err(e) => {
-                    warn!("Unable to load key, continuing without decryption: {e}");
-                    None
+                    error!("Unable to load audio key for track, failing load: {e}");
+                    return None;
                 }
             };
 

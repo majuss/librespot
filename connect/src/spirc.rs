@@ -533,7 +533,7 @@ impl SpircTask {
                     }
                 },
                 event = async { player_events?.recv().await }, if player_events.is_some() => if let Some(event) = event {
-                    if let Err(e) = self.handle_player_event(event) {
+                    if let Err(e) = self.handle_player_event(event).await {
                         error!("could not dispatch player event: {e}");
                     }
                 },
@@ -752,7 +752,7 @@ impl SpircTask {
         self.notify().await
     }
 
-    fn handle_player_event(&mut self, event: PlayerEvent) -> Result<(), Error> {
+    async fn handle_player_event(&mut self, event: PlayerEvent) -> Result<(), Error> {
         if let PlayerEvent::TrackChanged { audio_item } = event {
             self.connect_state.update_duration(audio_item.duration_ms);
             self.update_state = true;
@@ -875,6 +875,10 @@ impl SpircTask {
             PlayerEvent::Unavailable { track_id, .. } => {
                 self.handle_unavailable(&track_id)?;
                 if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri() {
+                    // Delay before skipping to prevent a rapid skip cascade that
+                    // can trigger Spotify's audio key rate limiting.
+                    warn!("Track unavailable, waiting 5s before skipping to next track");
+                    sleep(std::time::Duration::from_secs(5)).await;
                     self.handle_next(None)?
                 }
             }
