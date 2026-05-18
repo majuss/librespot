@@ -61,7 +61,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
 /// after 50 minutes to avoid the server closing the connection due to token
 /// expiry, which would cause the spirc to shut down unexpectedly and lose
 /// playback state.
-const PROACTIVE_RECONNECT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const PROACTIVE_RECONNECT_INTERVAL: Duration = Duration::from_secs(50 * 60);
 
 const DEALER_REQUEST_HANDLERS_POISON_MSG: &str =
     "dealer request handlers mutex should not be poisoned";

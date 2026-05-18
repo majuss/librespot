@@ -1001,9 +1001,10 @@ impl SpircTask {
 
         if let Some(cluster) = cluster_update.cluster.take() {
             let became_inactive = self.connect_state.is_active()
+                && !cluster.active_device_id.is_empty()
                 && cluster.active_device_id != self.session.device_id();
             if became_inactive {
-                info!("device became inactive");
+                info!("device became inactive (active_device_id={})", cluster.active_device_id);
                 self.handle_disconnect().await?;
                 self.handle_stop();
             } else if self.connect_state.is_active() {
