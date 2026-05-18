@@ -109,8 +109,17 @@ impl AudioKeyManager {
                 Err(_) => {
                     // Remove pending entry on timeout
                     self.lock(|inner| inner.pending.remove(&seq));
-                    error!("Audio key response timeout after {}ms", KEY_RESPONSE_TIMEOUT.as_millis());
-                    Err(AudioKeyError::Timeout.into())
+                    // Retry on timeout — can happen after session reconnect when the
+                    // previous Shannon channel is gone but new one isn't dispatching yet.
+                    let backoff_ms = BASE_BACKOFF_MS * (1u64 << attempt);
+                    warn!(
+                        "Audio key timeout, retry {}/{} after {}ms",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        backoff_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
                 }
                 Ok(Ok(Ok(key))) => return Ok(key),
                 Ok(Ok(Err(AudioKeyError::RateLimited))) => {
@@ -134,7 +143,7 @@ impl AudioKeyManager {
             return result;
         }
 
-        error!("Audio key request failed after {} retries (rate limited)", MAX_RETRIES);
+        error!("Audio key request failed after {} retries (timeout/rate limited)", MAX_RETRIES);
         Err(AudioKeyError::RateLimited.into())
     }
 
